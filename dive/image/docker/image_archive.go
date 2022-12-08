@@ -2,102 +2,63 @@ package docker
 
 import (
 	"archive/tar"
-	"compress/gzip"
-	"fmt"
+    "bytes"
+    "compress/gzip"
+    "fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
-	"strings"
+    "strings"
 
-	"github.com/wagoodman/dive/dive/filetree"
+    "github.com/wagoodman/dive/dive/filetree"
 	"github.com/wagoodman/dive/dive/image"
 )
 
 type ImageArchive struct {
 	manifest manifest
 	config   config
-	layerMap map[string]*filetree.FileTree
+	//layerMap map[string]*filetree.FileTree
+    tarContents map[string][]byte
 }
 
 func NewImageArchive(tarFile io.ReadCloser) (*ImageArchive, error) {
 	img := &ImageArchive{
-		layerMap: make(map[string]*filetree.FileTree),
+        tarContents: make(map[string][]byte),
 	}
 
 	tarReader := tar.NewReader(tarFile)
+    for {
+        header, err := tarReader.Next()
 
-	// store discovered json files in a map so we can read the image in one pass
-	jsonFiles := make(map[string][]byte)
+        if err == io.EOF {
+            break
+        }
 
-	var currentLayer uint
-	for {
-		header, err := tarReader.Next()
+        if err != nil {
+            fmt.Println(err)
+            os.Exit(1)
+        }
 
-		if err == io.EOF {
-			break
-		}
+        name := header.Name
 
-		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
-		}
+        // some layer tars can be relative layer symlinks to other layer tars
+        if header.Typeflag == tar.TypeSymlink || header.Typeflag == tar.TypeReg {
+            entryBytes, err := io.ReadAll(tarReader)
+            if err != nil {
+                return img, err
+            }
+            img.tarContents[name] = entryBytes
+        }
+    }
 
-		name := header.Name
-
-		// some layer tars can be relative layer symlinks to other layer tars
-		if header.Typeflag == tar.TypeSymlink || header.Typeflag == tar.TypeReg {
-
-			if strings.HasSuffix(name, ".tar") {
-				currentLayer++
-				layerReader := tar.NewReader(tarReader)
-				tree, err := processLayerTar(name, layerReader)
-				if err != nil {
-					return img, err
-				}
-
-				// add the layer to the image
-				img.layerMap[tree.Name] = tree
-
-			} else if strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, "tgz") {
-				currentLayer++
-
-				// Add gzip reader
-				gz, err := gzip.NewReader(tarReader)
-				if err != nil {
-					return img, err
-				}
-
-				// Add tar reader
-				layerReader := tar.NewReader(gz)
-
-				// Process layer
-				tree, err := processLayerTar(name, layerReader)
-				if err != nil {
-					return img, err
-				}
-
-				// add the layer to the image
-				img.layerMap[tree.Name] = tree
-
-			} else if strings.HasSuffix(name, ".json") || strings.HasPrefix(name, "sha256:") {
-				fileBuffer, err := ioutil.ReadAll(tarReader)
-				if err != nil {
-					return img, err
-				}
-				jsonFiles[name] = fileBuffer
-			}
-		}
-	}
-
-	manifestContent, exists := jsonFiles["manifest.json"]
+    manifestContent, exists := img.tarContents["manifest.json"]
 	if !exists {
 		return img, fmt.Errorf("could not find image manifest")
 	}
 
 	img.manifest = newManifest(manifestContent)
 
-	configContent, exists := jsonFiles[img.manifest.ConfigPath]
+    configContent, exists := img.tarContents[img.manifest.ConfigPath]
 	if !exists {
 		return img, fmt.Errorf("could not find image config")
 	}
@@ -105,6 +66,36 @@ func NewImageArchive(tarFile io.ReadCloser) (*ImageArchive, error) {
 	img.config = newConfig(configContent)
 
 	return img, nil
+}
+
+func getLayerByName(name string, img *ImageArchive) (*filetree.FileTree, error) {
+    layerData := img.tarContents[name]
+    //Docker Image Spec images will explicitly have this suffix for uncompressed layers.
+    if strings.HasSuffix(name, ".tar") {
+        layerReader := tar.NewReader(bytes.NewReader(layerData))
+        tree, err := processLayerTar(name, layerReader)
+        if err != nil {
+            return nil, err
+        }
+        return tree, nil
+    } else { // No conditional as nerdctl will not have a suffix but the layers are compressed.
+        // Add gzip reader
+        gz, err := gzip.NewReader(bytes.NewReader(layerData))
+        if err != nil {
+            return nil, err
+        }
+
+        // Add tar reader
+        layerReader := tar.NewReader(gz)
+
+        // Process layer
+        tree, err := processLayerTar(name, layerReader)
+        if err != nil {
+            return nil, err
+        }
+
+        return tree, nil
+    }
 }
 
 func processLayerTar(name string, reader *tar.Reader) (*filetree.FileTree, error) {
@@ -157,13 +148,19 @@ func getFileList(tarReader *tar.Reader) ([]filetree.FileInfo, error) {
 	return files, nil
 }
 
+
+
 func (img *ImageArchive) ToImage() (*image.Image, error) {
 	trees := make([]*filetree.FileTree, 0)
 
 	// build the content tree
 	for _, treeName := range img.manifest.LayerTarPaths {
-		tr, exists := img.layerMap[treeName]
+		_, exists := img.tarContents[treeName]
 		if exists {
+            tr, err := getLayerByName(treeName, img)
+            if err != nil {
+                return nil, fmt.Errorf("error reading '%s' in parsed layers", treeName)
+            }
 			trees = append(trees, tr)
 			continue
 		}

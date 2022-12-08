@@ -5,6 +5,7 @@ import (
 	"github.com/wagoodman/dive/dive/image"
 	"github.com/wagoodman/dive/dive/image/docker"
 	"github.com/wagoodman/dive/dive/image/podman"
+	"github.com/wagoodman/dive/dive/image/nerdctl"
 	"net/url"
 	"strings"
 )
@@ -14,14 +15,15 @@ const (
 	SourceDockerEngine
 	SourcePodmanEngine
 	SourceDockerArchive
+	SourceNerdctl
 )
 
 type ImageSource int
 
-var ImageSources = []string{SourceDockerEngine.String(), SourcePodmanEngine.String(), SourceDockerArchive.String()}
+var ImageSources = []string{SourceDockerEngine.String(), SourcePodmanEngine.String(), SourceDockerArchive.String(), SourceNerdctl.String()}
 
 func (r ImageSource) String() string {
-	return [...]string{"unknown", "docker", "podman", "docker-archive"}[r]
+	return [...]string{"unknown", "docker", "podman", "docker-archive", "nerdctl"}[r]
 }
 
 func ParseImageSource(r string) ImageSource {
@@ -32,6 +34,8 @@ func ParseImageSource(r string) ImageSource {
 		return SourcePodmanEngine
 	case SourceDockerArchive.String():
 		return SourceDockerArchive
+	case SourceNerdctl.String():
+		return SourceNerdctl
 	case "docker-tar":
 		return SourceDockerArchive
 	default:
@@ -54,6 +58,8 @@ func DeriveImageSource(image string) (ImageSource, string) {
 		return SourcePodmanEngine, imageSource
 	case SourceDockerArchive.String():
 		return SourceDockerArchive, imageSource
+	case SourceNerdctl.String():
+		return SourceNerdctl, imageSource
 	case "docker-tar":
 		return SourceDockerArchive, imageSource
 
@@ -67,6 +73,8 @@ func GetImageResolver(r ImageSource) (image.Resolver, error) {
 		return docker.NewResolverFromEngine(), nil
 	case SourcePodmanEngine:
 		return podman.NewResolverFromEngine(), nil
+	case SourceNerdctl:
+		return nerdctl.NewResolverFromEngine(), nil
 	case SourceDockerArchive:
 		return docker.NewResolverFromArchive(), nil
 	}
